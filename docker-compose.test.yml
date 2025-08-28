@@ -1,0 +1,13 @@
+version: "3.8"
+
+services:
+  unittest-runner:
+    image: alpine:3.20
+    command: ["/bin/sh", "-c", "echo 'Running placeholder tests'; sleep 1; echo 'OK'" ]
+
+
+
+
+
+
+

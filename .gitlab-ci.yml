@@ -1,0 +1,39 @@
+image: docker:latest
+
+services:
+  - docker:dind
+
+variables:
+  DOCKER_HOST: tcp://localhost:2375
+  DOCKER_TLS_CERTDIR: ""
+
+stages:
+  - test
+  - build
+  - deploy
+
+test:
+  stage: test
+  script:
+    - docker compose -f docker-compose.test.yml build
+    - docker compose -f docker-compose.test.yml run --rm unittest-runner
+
+build:
+  stage: build
+  script:
+    - echo "$DOCKER_REGISTRY_PASSWORD" | docker login -u "$DOCKER_REGISTRY_USER" --password-stdin
+    - docker compose -f docker-compose.prod.yml build
+    - docker compose -f docker-compose.prod.yml push
+
+deploy:
+  stage: deploy
+  script:
+    - scp -o StrictHostKeyChecking=no docker-compose.prod.yml ${DEPLOY_USER}@${FIXED_IP_HOST}:/app/
+    - ssh -o StrictHostKeyChecking=no ${DEPLOY_USER}@${FIXED_IP_HOST} "cd /app && docker login -u $DOCKER_REGISTRY_USER -p $DOCKER_REGISTRY_PASSWORD && docker compose -f docker-compose.prod.yml pull && docker compose -f docker-compose.prod.yml up -d --build"
+
+
+
+
+
+
+

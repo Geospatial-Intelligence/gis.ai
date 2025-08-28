@@ -1,0 +1,209 @@
+version: "3.8"
+
+services:
+  traefik:
+    image: traefik:v2.10
+    command:
+      - --providers.docker
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.websecure.http3=true
+      - --certificatesresolvers.leresolver.acme.email=${ACME_EMAIL}
+      - --certificatesresolvers.leresolver.acme.storage=/acme.json
+      - --certificatesresolvers.leresolver.acme.httpchallenge.entrypoint=web
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./acme.json:/acme.json
+    labels:
+      traefik.enable: "true"
+
+  api-gateway:
+    image: ${DOCKER_REGISTRY}/api-gateway:latest
+    build: ./nginx
+    depends_on:
+      - dynamic-content-generator
+      - vector-tile-server
+    volumes:
+      - static-content:/usr/share/nginx/html:ro
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.gisai.rule: Host(`${DOMAIN}`)
+      traefik.http.routers.gisai.entrypoints: web
+      traefik.http.routers.gisai.middlewares: redirect-to-https@docker
+      traefik.http.middlewares.redirect-to-https.redirectscheme.scheme: https
+      traefik.http.routers.gisai-https.rule: Host(`${DOMAIN}`)
+      traefik.http.routers.gisai-https.entrypoints: websecure
+      traefik.http.routers.gisai-https.tls: "true"
+      traefik.http.routers.gisai-https.tls.certresolver: leresolver
+      traefik.http.services.gisai.loadbalancer.server.port: "80"
+
+  # Infrastructure services
+  nats-server:
+    image: nats:2.9
+    command: ["-js", "-sd", "/data"]
+    volumes:
+      - nats-data:/data
+    labels:
+      traefik.enable: "false"
+
+  redis:
+    image: redis:7-alpine
+    labels:
+      traefik.enable: "false"
+
+  postgres:
+    image: postgis/postgis:15-3.3
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    labels:
+      traefik.enable: "false"
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio-data:/data
+    labels:
+      traefik.enable: "false"
+
+  searxng:
+    image: searxng/searxng:latest
+    environment:
+      SEARXNG_BASE_URL: http://searxng:8888
+    labels:
+      traefik.enable: "false"
+
+  tor-proxy:
+    image: dperson/torproxy
+    command: -a -s 9050:9050
+    labels:
+      traefik.enable: "false"
+
+  # Ingestion services (stubs)
+  deepweb-scraper:
+    image: custom-rust-scraper:latest
+    environment:
+      TOR_PROXY: ${TOR_PROXY}
+      NATS_URL: ${NATS_URL}
+    depends_on:
+      - nats-server
+      - tor-proxy
+    labels:
+      traefik.enable: "false"
+
+  searxng-agent:
+    image: python:3.11-slim
+    environment:
+      SEARXNG_URL: ${SEARXNG_URL}
+      REDIS_URL: ${REDIS_URL}
+    depends_on:
+      - searxng
+      - redis
+    labels:
+      traefik.enable: "false"
+
+  ai-provider-poller:
+    image: llm-poller:latest
+    environment:
+      WORKER_POOL_SIZE: ${WORKER_POOL_SIZE}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+      NATS_URL: ${NATS_URL}
+    depends_on:
+      - nats-server
+    labels:
+      traefik.enable: "false"
+
+  # Processing services (stubs)
+  unstructured-data-parser:
+    image: llama-cpp-python:latest
+    environment:
+      NATS_URL: ${NATS_URL}
+      POSTGRES_DSN: ${POSTGRES_DSN}
+      MINIO_ENDPOINT: http://minio:9000
+    depends_on:
+      - nats-server
+      - postgres
+      - minio
+    labels:
+      traefik.enable: "false"
+
+  valuation-engine:
+    image: valuation-engine:latest
+    environment:
+      NATS_URL: ${NATS_URL}
+      REDIS_URL: ${REDIS_URL}
+      POSTGRES_DSN: ${POSTGRES_DSN}
+      CRYPTOCOMPARE_API_KEY: ${CRYPTOCOMPARE_API_KEY}
+    depends_on:
+      - nats-server
+      - redis
+      - postgres
+    labels:
+      traefik.enable: "false"
+
+  geojson-optimizer:
+    image: node:20-slim
+    command: ["node", "/opt/process-geojson.js"]
+    volumes:
+      - ./scripts/process-geojson.js:/opt/process-geojson.js:ro
+      - static-content:/site
+    environment:
+      NATS_URL: ${NATS_URL}
+      MINIO_ENDPOINT: http://minio:9000
+      POSTGRES_DSN: ${POSTGRES_DSN}
+    depends_on:
+      - nats-server
+      - minio
+      - postgres
+    labels:
+      traefik.enable: "false"
+
+  # Output services (stubs)
+  dynamic-content-generator:
+    image: jinja2-ssg:latest
+    environment:
+      POSTGRES_DSN: ${POSTGRES_DSN}
+    volumes:
+      - static-content:/site
+    depends_on:
+      - postgres
+    labels:
+      traefik.enable: "false"
+
+  vector-tile-server:
+    image: techly/tileserver-gl
+    environment:
+      TILESERVER_OPTIONS: "--public_url /data"
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.tiles.rule: Host(`${DOMAIN}`) && PathPrefix(`/data/`)
+      traefik.http.routers.tiles.entrypoints: websecure
+      traefik.http.routers.tiles.tls: "true"
+      traefik.http.routers.tiles.tls.certresolver: leresolver
+      traefik.http.services.tiles.loadbalancer.server.port: "80"
+
+volumes:
+  postgres-data:
+  minio-data:
+  static-content:
+  nats-data:
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+
+
